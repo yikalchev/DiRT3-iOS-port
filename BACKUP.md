@@ -1,0 +1,202 @@
+# Source-only backup
+
+This repository preserves the authored MotorStorm port work. It does not
+contain the game, firmware, generated game source, installed game data, saves,
+executables, shader caches, recordings or GPU captures. Those remain local.
+Git LFS is not required.
+
+## What is preserved
+
+- `port/`: authored runner, platform adapters, native optimization helpers,
+  CMake build configuration and tests.
+- `MotorStorm/`: the Xcode project, macOS app entry point and app icons. The
+  macOS and iOS entries link separate engine builds. iOS also preserves its
+  touch controls, dependency manifest and reproducible cross-build scripts.
+- `tools/` and `tests/`: source generation, launch, capture, analysis and
+  verification tools.
+- `patches/ps3recomp-local.patch`: tracked changes **and new source files** from
+  our modified runtime/recompiler, against the exact commit in
+  `research/ps3recomp-commit.txt`.
+- `research/`: input hashes, pinned upstream versions, small authored control
+  plans and the original resolution experiment.
+- `README.md`: research history and measured limitations. References to
+  `logs/` refer to local evidence that is deliberately not uploaded.
+
+The main upstream is [ps3recomp](https://github.com/sp00nznet/ps3recomp).
+Its MIT license is preserved in `port/UPSTREAM-LICENSE`; notices for bcdec and
+xxHash are included with their code in the runtime patch.
+[MSMV-unpacker](https://github.com/Scirvir/MSMV-unpacker) was an optional archive
+reference; its pinned commit is recorded, but it is not required by the build.
+No license for the original game or its assets is granted by this repository.
+
+## Restore on another Mac
+
+Install the prerequisites listed in `README.md`, then:
+
+```sh
+python3 tools/bootstrap_runtime.py
+```
+
+This fetches the pinned open-source runtime and applies the saved patch. It
+refuses to overwrite a checkout with unrelated local changes. To verify an
+existing checkout without downloading or changing files:
+
+```sh
+python3 tools/bootstrap_runtime.py --check
+```
+
+Supply your own matching local game files under `game/`. The input used here
+is BCES00006 version 03.10; hashes are in `research/input-manifest.json`.
+Then regenerate the game-derived sources locally and build:
+
+```sh
+sh tools/analyze_game.sh
+sh tools/build_port.sh
+sh tools/play-experimental.command
+```
+
+Generation also restores the manually authored job-wait wrapper with
+`tools/patch_job_wait.py`. That tool stores the wrapper and an expected
+fingerprint, not the original game function. It refuses to patch an unexpected
+function. The SPU overlays and policy are also generated from the local game.
+`tools/build_port.sh` additionally generates the three checked Multistream DSP
+overlays with `tools/lift_motorstorm_audio.py`. The generator and authored NEON
+helpers are preserved; generated DSP code, its byte signatures and audio replay
+captures are excluded. Replay tests require the matching local captures under
+`logs/`, while the conversion and runtime handoff tests use synthetic inputs.
+The build also invokes `tools/specialize_audio_worker.py` to regenerate four
+checked Multistream loop replacements in ignored `build/`. The authored
+generator, `port/spu_audio_worker.h` and differential replay harness are backed
+up; the specialized game source and its input snapshots are not.
+Existing installations and saved state under `gamedata/` are not backed up.
+
+The runtime patch also preserves the compact Metal B8 initialization path and
+the optional fast SPU dispatch checks, with synthetic GPU/dispatcher regression
+tests. `tools/test_surface_gpu_seed.sh`, `tools/test_dispatch_checks.sh` and
+`tools/profile_manual_gameplay.py` are authored source. Their local gameplay
+profiles, executable snapshots and Instruments traces under `logs/` are excluded.
+
+All 91 changed/new runtime files were restored byte-for-byte in a temporary
+directory from upstream source plus the patch. The wait wrapper was also
+reconstructed byte-for-byte without modifying the live generated source.
+A complete fresh regeneration/build/gameplay run from this backup has not
+been performed. The historical `tools/repair_havok_switch.py` is retained as
+an integration repair; the generic discovery fix is already in the runtime
+patch. After restoring the local prerequisites, the Xcode **MotorStorm** scheme
+builds the shared CMake/Ninja archive and runs the macOS game directly. The
+generated link response and launch resource are local build output, not backup
+content. `port/macos-launch.json` preserves the shared launch defaults. Use
+Xcode's normal Derived Data location outside iCloud Drive for app products.
+
+The macOS target now builds an independent snapshot of the revision recorded
+in `port/macos-baseline.json`, via `tools/build_macos_runtime.py`. Keep that
+commit in Git history: its runtime patch and generators reconstruct the macOS
+version even while the working tree's sources and patch evolve for iOS.
+The generated snapshot and compiled files in `build/macos-stable/` are local
+only. The game assets are referenced, not copied or uploaded. The iOS target
+continues building the working tree; changing iOS source cannot change the
+pinned macOS source. Do not edit the generated macOS snapshot in place.
+
+## Saved Duo iOS build: 2026-10-25
+
+The source recovery point is the Git tag `ios-duo-20261025`. The user confirmed
+that the signed mode-7 app runs well on Gummi (Duo). This is qualitative device
+acceptance, not a measured sustained 30 FPS result. Gummi 2 performance remains
+unresolved. The tag packages `MOTORSTORM_WWS_CHAIN=7` as the iOS default; a
+process environment override of `0` selects the retained previous WWS route.
+
+The ignored local directory `output/releases/ios-duo-20261025/` contains:
+
+- `approved-app.tar.gz` and `approved-build.json`: the exact signed app tested
+  on Duo, per-file SHA-256 values and its required launch environment.
+- `packaged-default-app.tar.gz`: the app rebuilt with the tested WWS selection
+  in its launch resource, so ordinary launches select the same route.
+- `working-source-before-save.tar.gz`, the source manifest and Git bundle:
+  the entire authored working state before saving, including local settings.
+- `repository-after-merge.bundle`: the Git history after merging, including
+  the pinned macOS commit and the iOS recovery tag.
+- `historical-apps/` and `cleanup-manifest.json`: compressed older signed apps
+  and the mapping from their former build/log paths. Old uncompressed copies
+  are removed only after every archived file has been hash-verified. Source
+  checkpoints, replay fixtures and measurement evidence remain in place.
+
+To reinstall the exact tested app, extract `approved-app.tar.gz` to a temporary
+directory, then install and launch it on the connected device:
+
+```sh
+xcrun devicectl device install app --device <device-id> '<temporary-directory>/MotorStorm iOS.app'
+xcrun devicectl device process launch --device <device-id> --terminate-existing \
+  --environment-variables '{"MOTORSTORM_WWS_CHAIN":"7"}' com.lithium.motorstorm -- --start-game
+```
+
+The game files and saves must still be on the phone. A development signature
+can expire; the tag and source backup allow rebuilding with a valid identity.
+Use a separate checkout when restoring source so current local work is kept.
+The local archive also needs an external backup to survive disk loss; GitHub
+contains only authored source and history, not these signed apps.
+
+This save does not advance `port/macos-baseline.json`, alter the macOS app or
+delete `build/macos-stable/`. Local macOS signing overrides remain uncommitted
+and are preserved in the pre-save source archive.
+
+## iOS automatic launch and diagnostics-free build: 2026-10-26
+
+The tag `ios-autostart-20261026` preserves source commit `18b2ab5`, the signed
+build installed on Gummi (Duo). It starts automatically with the centered logo
+in the same landscape controller as the former menu buttons. The initial
+system launch screen is black to avoid the upside-down snapshot seen on Duo.
+The setup buttons, title, FPS overlay and normal-build performance recording
+are removed. Startup and logo orientation were checked on the device; race FPS
+was not remeasured for this change.
+
+The tag `before-ios-autostart-20261026` preserves `main` immediately before this
+merge. The earlier `ios-duo-20261025` tag and both signed Duo app archives remain
+available. Use a separate checkout of either tag to rebuild without disturbing
+current work. To undo this entire merge on `main` without rewriting history,
+revert its merge commit with `git revert -m 1 <merge-commit>`.
+
+The ignored directory `output/releases/ios-autostart-20261026/` contains
+`app.tar.gz`, `source.tar.gz`, their manifests and `SHA256SUMS`, plus device
+validation evidence and `RESTORE.txt`. The app archive contains the signed
+build; install it over the existing bundle to preserve the phone's game data.
+Only authored source, the supplied startup logo, and Git recovery tags are
+published. App binaries, local evidence, game files and saves remain local.
+
+The macOS baseline remains `04910a9c6667d3e0ac3d9d9b0443f75d28608c26`.
+The shared Xcode project commit changes only the iOS Debug/Release objects;
+existing local macOS signing and project edits stay uncommitted. The baseline
+check verified 1,176 source files, and compiled isolation checks verified all
+362 compile commands and the runtime-C-only alignment fix.
+
+## Duo display and touch controls: 2026-10-26
+
+The tag `ios-duo-controls-20261026` preserves device-tested source commit
+`4b48b02`: full-screen presentation on Duo, no startup logo, larger translucent
+controls with Boost above steering, and equal edge margins on the cover display.
+The user accepted the result on both Duo displays. Internal game resolution and
+the runtime are unchanged; this UI release does not establish a new FPS result.
+
+`before-ios-duo-controls-20261026` preserves the previous `main` (`c867c3f`).
+Both recovery tags can be rebuilt in a separate checkout. The merge can also be
+undone without rewriting history using `git revert -m 1 <merge-commit>`.
+Local build/install records and screenshots remain under
+`output/releases/ios-controls-edges-20261026/`; the merge verification and saved
+local project settings are in `output/releases/ios-controls-merge-20261026/`.
+These private records are not published. macOS remains on its existing baseline,
+and local macOS project/signing overrides remain uncommitted.
+
+## Updating the backup
+
+Before committing further runtime changes:
+
+```sh
+python3 tools/export_runtime_patch.py
+python3 tools/bootstrap_runtime.py --check
+git status --short
+git diff --stat
+```
+
+Inspect the staged paths and sizes before pushing. Keep generated game code,
+game data, binaries and captures excluded even if Git offers to force-add them.
+Only the latest runtime patch is versioned; Git history preserves future
+versions without duplicate patch files.

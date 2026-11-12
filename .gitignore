@@ -1,6 +1,7 @@
 # Local game data, generated game code and third-party checkouts.
 /game/
 /icon/
+/scripts/
 /gamedata/
 /build/
 /logs/

@@ -23,7 +23,7 @@ int ms_rsx_phase_account_enabled(void);
 // Three 1 MiB circular sample files per session; retain five sessions.
 // No network, video, audio samples, stack sampling, or GPU readback.
 static const NSUInteger kPartLimit = 1024 * 1024;
-static const NSUInteger kNativeLimit = 2 * 1024 * 1024;
+static const NSUInteger kNativeLimit = 16 * 1024 * 1024;
 static void (^s_guestFPS)(double);
 
 static NSString *executableUUID(void)

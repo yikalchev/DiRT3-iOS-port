@@ -160,6 +160,8 @@ static NSURL *validatedGameRoot(NSURL *root, NSDictionary *files)
 @property(nonatomic, strong) UIProgressView *progressBar;
 @property(nonatomic, strong) UILabel *progressPercent;
 @property(nonatomic, strong) NSTimer *progressTimer;
+@property(nonatomic, strong) NSTimer *gamepadTimer;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *gamepadMasks;
 - (void)gameReturned:(int)result;
 - (void)updateControlsToggleLabel;
 - (void)setTouchControlsVisible:(BOOL)visible;
@@ -200,6 +202,12 @@ static void *runGame(void *opaque)
     [super viewDidLoad];
     self.view.backgroundColor = UIColor.blackColor;
     self.gamepadSources = [NSMutableDictionary dictionary];
+    self.gamepadMasks = [NSMutableDictionary dictionary];
+    // Poll connected controllers at 250 Hz instead of relying on per-element
+    // change handlers (which some controller/host setups never deliver).
+    self.gamepadTimer = [NSTimer timerWithTimeInterval:0.004 target:self
+        selector:@selector(pollGamepads) userInfo:nil repeats:YES];
+    [NSRunLoop.mainRunLoop addTimer:self.gamepadTimer forMode:NSRunLoopCommonModes];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(gamepadConnected:)
         name:GCControllerDidConnectNotification object:nil];
     [NSNotificationCenter.defaultCenter addObserver:self selector:@selector(gamepadDisconnected:)
@@ -484,41 +492,61 @@ static void *runGame(void *opaque)
 }
 - (void)configureGamepad:(GCController *)controller
 {
-    GCExtendedGamepad *pad = controller.extendedGamepad;
-    if (!pad) return;
-    NSString *prefix = [NSString stringWithFormat:@"%p:", controller];
-    void (^button)(GCControllerButtonInput *, unsigned, NSString *) = ^(GCControllerButtonInput *input, unsigned key, NSString *name) {
-        input.valueChangedHandler = ^(GCControllerButtonInput *button, float value, BOOL pressed) {
-            [self setGamepadKey:key source:[prefix stringByAppendingString:name] pressed:pressed];
-        };
+    // Input is read by pollGamepads; here we only log what was found.
+    fprintf(stderr, "[gamepad] connected: \"%s\" extended=%d (controllers=%lu)\n",
+            controller.vendorName.UTF8String ?: "?", controller.extendedGamepad != nil,
+            (unsigned long)GCController.controllers.count);
+}
+- (void)pollGamepads
+{
+    static const unsigned kKeys[16] = {
+        kPS3Select, kPS3L3, kPS3R3, kPS3Start, kPS3Up, kPS3Right, kPS3Down, kPS3Left,
+        kPS3L2, kPS3R2, kPS3L1, kPS3R1, kPS3Triangle, kPS3Circle, kPS3Cross, kPS3Square };
+    float lx = 0, ly = 0, rx = 0, ry = 0, lt = 0, rt = 0;
+    BOOL any = NO;
+    for (GCController *controller in GCController.controllers) {
+        GCExtendedGamepad *pad = controller.extendedGamepad;
+        if (!pad) continue;
+        any = YES;
+        unsigned mask = 0;
+        #define B(input, bit) if ((input) && (input).isPressed) mask |= 1u << (bit)
+        B(pad.buttonOptions, 0); B(pad.leftThumbstickButton, 1); B(pad.rightThumbstickButton, 2);
+        B(pad.buttonMenu, 3);
+        B(pad.dpad.up, 4); B(pad.dpad.right, 5); B(pad.dpad.down, 6); B(pad.dpad.left, 7);
+        B(pad.leftShoulder, 10); B(pad.rightShoulder, 11);
+        B(pad.buttonY, 12); B(pad.buttonB, 13); B(pad.buttonA, 14); B(pad.buttonX, 15);
+        #undef B
+        NSString *key = [NSString stringWithFormat:@"%p", controller];
+        unsigned previous = self.gamepadMasks[key].unsignedIntValue;
+        if (mask != previous) {
+            if (mask && !previous) {
+                static int logged = 0;
+                if (logged++ < 3) fprintf(stderr, "[gamepad] first input mask=0x%04X\n", mask);
+            }
+            for (unsigned bit = 0; bit < 16; ++bit) {
+                unsigned m = 1u << bit;
+                if ((mask ^ previous) & m)
+                    [self setGamepadKey:kKeys[bit] source:[key stringByAppendingString:@":poll"]
+                                pressed:(mask & m) != 0];
+            }
+            self.gamepadMasks[key] = @(mask);
+        }
+        lx += pad.leftThumbstick.xAxis.value; ly += pad.leftThumbstick.yAxis.value;
+        rx += pad.rightThumbstick.xAxis.value; ry += pad.rightThumbstick.yAxis.value;
+        lt = MAX(lt, pad.leftTrigger.value); rt = MAX(rt, pad.rightTrigger.value);
+    }
+    static BOOL hadPad = NO;
+    if (!any && !hadPad) return;          // leave the touch sticks alone
+    hadPad = any;
+    if (any && self.stickControlsEnabled && !self.controls.hidden) return;
+    auto axis = [](float v, BOOL invert) -> unsigned {
+        v = MAX(-1.0f, MIN(1.0f, v)); if (fabsf(v) < 0.12f) v = 0;
+        return (unsigned)lrintf(128.0f + (invert ? -v : v) * 127.0f);
     };
-    button(pad.dpad.left, kPS3Left, @"dpad-left"); button(pad.dpad.right, kPS3Right, @"dpad-right");
-    button(pad.dpad.up, kPS3Up, @"dpad-up"); button(pad.dpad.down, kPS3Down, @"dpad-down");
-    button(pad.buttonA, kPS3Cross, @"a-cross");
-    button(pad.buttonB, kPS3Circle, @"b-circle");
-    button(pad.buttonX, kPS3Square, @"x-square");
-    button(pad.buttonY, kPS3Triangle, @"y-triangle");
-    button(pad.leftShoulder, kPS3L1, @"lb-l1");
-    button(pad.rightShoulder, kPS3R1, @"rb-r1");
-    button(pad.buttonMenu, kPS3Start, @"menu-start");
-    if (pad.buttonOptions) button(pad.buttonOptions, kPS3Select, @"view-select");
-    if (pad.leftThumbstickButton) button(pad.leftThumbstickButton, kPS3L3, @"l3");
-    if (pad.rightThumbstickButton) button(pad.rightThumbstickButton, kPS3R3, @"r3");
-    // Analog triggers -> L2/R2 pressure (axes 4/5); cellPad derives the digital bit.
-    pad.leftTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
-        rsx_metal_touch_axis(4, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, value)) * 255.0f));
-    };
-    pad.rightTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
-        rsx_metal_touch_axis(5, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, value)) * 255.0f));
-    };
-    pad.leftThumbstick.valueChangedHandler = ^(GCControllerDirectionPad *stick, float x, float y) {
-        rsx_metal_touch_axis(0, (unsigned)lrintf(128.0f + MAX(-1.0f, MIN(1.0f, x)) * 127.0f));
-        rsx_metal_touch_axis(1, (unsigned)lrintf(128.0f - MAX(-1.0f, MIN(1.0f, y)) * 127.0f));
-    };
-    pad.rightThumbstick.valueChangedHandler = ^(GCControllerDirectionPad *stick, float x, float y) {
-        rsx_metal_touch_axis(2, (unsigned)lrintf(128.0f + MAX(-1.0f, MIN(1.0f, x)) * 127.0f));
-        rsx_metal_touch_axis(3, (unsigned)lrintf(128.0f - MAX(-1.0f, MIN(1.0f, y)) * 127.0f));
-    };
+    rsx_metal_touch_axis(0, axis(lx, NO)); rsx_metal_touch_axis(1, axis(ly, YES));
+    rsx_metal_touch_axis(2, axis(rx, NO)); rsx_metal_touch_axis(3, axis(ry, YES));
+    rsx_metal_touch_axis(4, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, lt)) * 255.0f));
+    rsx_metal_touch_axis(5, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, rt)) * 255.0f));
 }
 // Semi-transparent progress panel for the game's progress-bar dialogs (the
 // first-boot copy of install.nfs, about 4 GB). The firmware dialog is not

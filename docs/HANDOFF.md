@@ -260,3 +260,86 @@ diagnostic switches are documented in
 - Fix: iOS skips SDL pad init/poll; new direct lane in cellPad (host keys 64..79 = PS3 button bits 0..15),
   analog L2/R2 on touch axes 4/5. main.mm maps Xbox A/B/X/Y→Cross/Circle/Square/Triangle, LB/RB→L1/R1,
   LT/RT→L2/R2 (analog), Menu→Start, View→Select, D-pad→D-pad, sticks→analog, L3/R3. Touch buttons use the same lane.
+
+## Run 16: menus + race reachable (input works) — slow, silent, black race, crash
+- Perf: 472,296 SPU tasks each got a fresh pthread (256 MB stack). Added SPU_ASYNC_REUSE_ALL=1 (reuse cache for
+  every returning image except 22; slots 4→16). Removed leftover diagnostic options (PCWATCH, EVT_RECV_TRACE,
+  stall dump, dyn-watch, PM trace, DMA image/range, atomtrace).
+- Audio: MultiStream SPU (342301998) interprets runtime-loaded overlays (LS 0x2D690/0x2DE68/0x2F178) and then
+  jumps to LS 0 -> FAULT; every audio block afterwards silent. Added SPU_ZERO_TRACE=<img> (last 32 transfers
+  before landing on LS 0) to find the bad caller.
+- Black race screen and crash: native.log stopped being written before the race (no data); next run needed.
+
+## Run 17: smooth start with sound, degrades; audio dies; race black
+- Thread reuse works: 95% of 455k dispatches reused (21.9k threads vs 472k).
+- Audio death: MultiStream SPU calls through LS[0x3AB80] (stored once at init at 0x484 from the plugin
+  init routine at LS[0x3AAB0]=0x30780+off) from 0x19A8; it reads 0 later -> jump to LS 0 -> FAULT.
+  Something clobbers 0x3AB80 after init. SPU_LS_WATCH=0x3AB80 added (logs every write/DMA-GET onto it).
+- native.log hit its 2 MB cap before the race (per-task SPURS prints ~150/s). Capped those prints to 200
+  each; kNativeLimit 2→16 MB.
+- Shader compile wall 49.6 s in run 17 (synchronous newLibraryWithSource on new content) = stutters.
+  Translation (HLSL→MSL) is disk-cached; Metal compile relies on the OS cache. Candidate: MTLBinaryArchive.
+- Controller now polled at 250 Hz (GCController.controllers) instead of change handlers; logs "[gamepad]".
+
+## Run 18
+- Menu "30 s" lag = shader compiles: per-second samples show 8-34 builds/s at 0-1 fps (each 60-100 ms,
+  41 s total). Added RSX_METAL_ASYNC_SHADERS=1: newLibraryWithSource:completionHandler:, pending functions
+  make pipeline_create return 0 + rsx_backend_pipeline_pending_take()=1; draw engine drops the draw without
+  caching the failure. Draws of brand-new shaders may be missing for a frame or two.
+- 31 RSX SEMA give-ups on label 0x7D0 (never written, 250 ms each) in loading/race; armed PORT_DYN_WATCH
+  0x3F0007C0+0x20 and SPU_DMA_RANGE 3F0007C0-3F0007E0 to find the producer.
+- MultiStream dies at boot (line ~2200), before any game audio; LS[0x3AB80] is the output of the call at
+  0x480 into the runtime-loaded plugin (LS[0x3AAB0]=0x30780+off, interpreted). The lifted-write watch is
+  compiled out on iOS (SPU_LS_DIAGNOSTICS), so no writer was seen. Next: trace the interpreted plugin call.
+- More spam capped (_TaskAttributeInitialize, TaskAttr R8-form: 178k lines).
+
+## Run 19: race reached (car intro video, GO), race view black
+- Race fragment programs failed HLSL parse: "array index out of range '58'/'55'/'54'" — FP decompiler declared
+  r[48]/h[48]; NV40 temp index is 6 bits. Now r[64]/h[128] (h aliases r halves), alias guard widened.
+- MSL translation disk cache keyed on __DATE__/__TIME__ → cold after every rebuild. Now RSX_MSL_CACHE_REV.
+- Remaining slow seconds: sync HLSL→MSL translation (300-750 ms/s) + sync pipeline builds (up to ~670 ms/s).
+- Label 0x7D0 is a PPU producer flag (guest fn 0x0105468C stores 1); RSX acquire gives up when the PPU is late.
+- Fully async shader path (RSX_METAL_ASYNC_SHADERS=1): eng_function now does HLSL→MSL translation on a serial
+  GCD queue + newLibraryWithSource:completionHandler:; eng_pipeline_create keys pipelines (vs/ps HLSL, rs,
+  layout, stride, fmt, count) in a 16k open-addressed table, builds depth-stencil sync and the PSO with
+  newRenderPipelineStateWithDescriptor:completionHandler: (not for native MSAA). Pending → draw skipped,
+  not cached; render thread never blocks on shaders. Backup of the pre-change file: none in repo (patch history).
+- Audio: SPU_NULLCALL_SKIP=342301998 makes the null-pointer call at 0x19A8 (LS[0x3AB80]) return r3=0 instead
+  of halting the MultiStream SPU. SPU_ZERO_TRACE now also logs the first 48 transfers (init path) and, on the
+  first call into high LS (>=0x30000), the plugin code, the descriptor at $80 and LS[0x3AAB0]/[0x306E0].
+
+## Run 20: graphics broken (half white / half black), user: worst build
+- Fully async shaders/pipelines skip draws while pending; one-shot passes are lost → broken frames.
+  RSX_METAL_ASYNC_SHADERS set to 0 (code kept). MSL cache key fix + FP r[64]/h[128] fix stay.
+- Audio: null-call skip works — silent blocks 98% → 58%. MultiStream's init (0x2C8 mailbox plugin load) never
+  runs; entry 0xD0 goes straight to the mixer loop, so LS[0x3AB80] stays 0. zero-trace dumps capped to 2.
+- Removed PORT_DYN_WATCH / SPU_DMA_RANGE (0x7D0 producer identified: PPU fn 0x0105468C).
+
+## Run 21: shader compile wall 97.8 s (worse), buzzing audio, pixelated, race black/not starting
+- r[64]/h[128] fixed files doubled every shader's compile cost. FP decompiler now rewrites the declaration to
+  the highest r[]/h[] index actually used (post-pass before preamble insert).
+- SPU_NULLCALL_SKIP produced a buzz ("fan") instead of silence → removed (and SPU_ZERO_TRACE).
+
+## Run 22: pixelated, gray screens from start, car preview + rally black
+- Run 19 was the best visual state. Reverted the FP register-file change (back to r[48]/h[48], alias r<24):
+  shaders that used to fail (dropped) were now drawn wrongly → pixelated overlay / black car preview.
+- RSX_METAL_ASYNC_SHADERS modes: 1 = run-19 behaviour (sync HLSL→MSL, async Metal compile, sync PSO) — now the
+  default in options; 2 = fully async (translate + compile + PSO; run 20, broke one-shot passes).
+- Warm second run still spent 33 s in shader builds (first: 44 s): the Metal compile itself dominates, the MSL
+  translation cache only helps a little. Next candidate: persistent Metal binary archive for pipelines.
+
+## Run 23: best build (async mode 1, FP fix reverted) — crash right before the rally starts
+- Guest FATAL: "NeMemorySlot::allocateAligned/useAddressSpace(... m_slotSize=65552) failed. Out of physical
+  memory or Virtual memory problem", then null-page writes and SIGBUS in func_01095900.
+- Cause: sys_mmapper search_and_map (lv2 337) rounded every block to 1 MB, ignored which reserved region
+  `start` belonged to after the first call, and unmap/free were no-ops (no reuse). Region exhausted on rally load.
+- Fix: ps3_mm_* allocator in ppu_sysprx.cpp — regions from lv2 330, first-fit 64 KB-aligned placement within
+  the region containing `start`, map_memory recorded + committed, unmap frees and writes *mem_id, ENOMEM
+  (0x80010004) when full. id→size table 256 → 256K entries. All mmapper calls logged (first 300 each).
+
+## Run 24: rally reached, no crash (mmapper allocator works), HUD visible, 3D scene black
+- Shader wall 3.0 s, pipeline 0.6 s, max present gap 0.7 s (warm cache + async mode 1).
+- 9 race FPs still fail "array index out of range" (temps > 47). FP decompiler now enlarges r/h files ONLY for
+  programs that index past 47 (post-pass); every other program's text is unchanged (caches stay warm).
+  Aliasing for high temps still skipped (as before).
+- After ~190 s: CPU 400-450 %, thermal 2, fps 14-20 (CPU-bound + throttled). Memory flat ~940 MB.

@@ -251,3 +251,12 @@ diagnostic switches are documented in
   ran → RSX SEMA give-ups → MAIN stuck in func_00E7479C waiting on ring space.
 - Fix: `spu_workload_set_dispatch_task()` (thread-local hand-off) called by cellSpursCreateTask and
   spu_taskset_task_exited right before `spu_workload_dispatch_async`; dispatch uses it in preference to the globals.
+
+## Run 16: game reaches "Press START" — input fixed
+- Causes: (1) on iOS cellPad also polled SDL2; SDL reported the Xbox pad as connected with no data, which
+  skipped the app's GameController/touch path entirely. (2) The app sent WRC keyboard codes through
+  mac_keyboard_pad_state(), whose output depends on port_keyboard_context(); DiRT 3 returns UNKNOWN, so
+  Start/Cross/Circle/menu up-down mapped to nothing.
+- Fix: iOS skips SDL pad init/poll; new direct lane in cellPad (host keys 64..79 = PS3 button bits 0..15),
+  analog L2/R2 on touch axes 4/5. main.mm maps Xbox A/B/X/Y→Cross/Circle/Square/Triangle, LB/RB→L1/R1,
+  LT/RT→L2/R2 (analog), Menu→Start, View→Select, D-pad→D-pad, sticks→analog, L3/R3. Touch buttons use the same lane.

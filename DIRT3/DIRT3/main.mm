@@ -21,6 +21,14 @@ extern "C" void rsx_metal_touch_axis(unsigned, unsigned);
 extern "C" void rsx_metal_touch_clear(void);
 extern "C" int ps3_msgdialog_progress(char *msg, unsigned cap, unsigned *percent);
 
+// Direct PS3 pad lane: host key 64+n sets CELL_PAD button bit n in cellPad
+// (no keyboard-context remapping). Xbox positions map to the PS3 positions.
+enum : unsigned {
+    kPS3Select = 64, kPS3L3 = 65, kPS3R3 = 66, kPS3Start = 67,
+    kPS3Up = 68, kPS3Right = 69, kPS3Down = 70, kPS3Left = 71,
+    kPS3L2 = 72, kPS3R2 = 73, kPS3L1 = 74, kPS3R1 = 75,
+    kPS3Triangle = 76, kPS3Circle = 77, kPS3Cross = 78, kPS3Square = 79,
+};
 static const unsigned kXboxA = 2001;
 static const unsigned kXboxB = 2002;
 static const unsigned kXboxX = 2003;
@@ -344,19 +352,23 @@ static void *runGame(void *opaque)
 - (NSArray<NSNumber *> *)guestKeysForTouchTag:(unsigned)tag
 {
     switch (tag) {
-        case kXboxA: return @[@36, @120];
-        case kXboxB: return @[@122];
-        case kXboxX: return @[@125];
-        case kXboxY: return @[@8];
-        case kXboxLB: return @[@117];
-        case kXboxRB: return @[@121];
-        case kXboxLT: return @[@125];
-        case kXboxRT: return @[@126];
-        case kXboxView: return @[@36];
-        case kXboxMenu: return @[@53];
-        case 130: return @[@31]; /* L3: O key in the shared keyboard pad map */
-        case 131: return @[@48]; /* R3: Tab in the shared keyboard pad map */
-        default: return @[@(tag)];
+        case 123: return @[@(kPS3Left)];
+        case 124: return @[@(kPS3Right)];
+        case 126: return @[@(kPS3Up)];
+        case 125: return @[@(kPS3Down)];
+        case kXboxA: return @[@(kPS3Cross)];
+        case kXboxB: return @[@(kPS3Circle)];
+        case kXboxX: return @[@(kPS3Square)];
+        case kXboxY: return @[@(kPS3Triangle)];
+        case kXboxLB: return @[@(kPS3L1)];
+        case kXboxRB: return @[@(kPS3R1)];
+        case kXboxLT: return @[@(kPS3L2)];
+        case kXboxRT: return @[@(kPS3R2)];
+        case kXboxView: return @[@(kPS3Select)];
+        case kXboxMenu: return @[@(kPS3Start)];
+        case 130: return @[@(kPS3L3)];
+        case 131: return @[@(kPS3R3)];
+        default: return @[];
     }
 }
 - (void)controlDown:(UIButton *)sender
@@ -404,6 +416,7 @@ static void *runGame(void *opaque)
         for (NSString *source in self.gamepadSources[key].copy)
             if ([source hasPrefix:prefix]) [self setGamepadKey:key.unsignedIntValue source:source pressed:NO];
     }
+    for (unsigned i = 0; i < 6; ++i) rsx_metal_touch_axis(i, i < 4 ? 128 : 0);
     dispatch_async(dispatch_get_main_queue(), ^{
         if (GCController.controllers.count == 0) self.controls.hidden = NO;
         [self updateControlsToggleLabel];
@@ -479,44 +492,32 @@ static void *runGame(void *opaque)
             [self setGamepadKey:key source:[prefix stringByAppendingString:name] pressed:pressed];
         };
     };
-    button(pad.dpad.left, 123, @"dpad-left"); button(pad.dpad.right, 124, @"dpad-right");
-    button(pad.dpad.up, 126, @"dpad-up"); button(pad.dpad.down, 125, @"dpad-down");
-    pad.buttonA.valueChangedHandler = ^(GCControllerButtonInput *input, float value, BOOL pressed) {
-        NSString *source = [prefix stringByAppendingString:@"a-confirm-throttle"];
-        [self setGamepadKey:36 source:source pressed:pressed];
-        [self setGamepadKey:120 source:source pressed:pressed];
+    button(pad.dpad.left, kPS3Left, @"dpad-left"); button(pad.dpad.right, kPS3Right, @"dpad-right");
+    button(pad.dpad.up, kPS3Up, @"dpad-up"); button(pad.dpad.down, kPS3Down, @"dpad-down");
+    button(pad.buttonA, kPS3Cross, @"a-cross");
+    button(pad.buttonB, kPS3Circle, @"b-circle");
+    button(pad.buttonX, kPS3Square, @"x-square");
+    button(pad.buttonY, kPS3Triangle, @"y-triangle");
+    button(pad.leftShoulder, kPS3L1, @"lb-l1");
+    button(pad.rightShoulder, kPS3R1, @"rb-r1");
+    button(pad.buttonMenu, kPS3Start, @"menu-start");
+    if (pad.buttonOptions) button(pad.buttonOptions, kPS3Select, @"view-select");
+    if (pad.leftThumbstickButton) button(pad.leftThumbstickButton, kPS3L3, @"l3");
+    if (pad.rightThumbstickButton) button(pad.rightThumbstickButton, kPS3R3, @"r3");
+    // Analog triggers -> L2/R2 pressure (axes 4/5); cellPad derives the digital bit.
+    pad.leftTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
+        rsx_metal_touch_axis(4, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, value)) * 255.0f));
     };
-    button(pad.buttonB, 122, @"b-contextual-back-boost");
-    button(pad.buttonX, 125, @"x-brake"); button(pad.buttonY, 8, @"y-camera");
-    button(pad.leftShoulder, 117, @"l1-look-back");
-    button(pad.rightShoulder, 121, @"r1-boost");
-    button(pad.buttonMenu, 53, @"menu-back");
-    button(pad.buttonOptions, 36, @"options-confirm");
+    pad.rightTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
+        rsx_metal_touch_axis(5, (unsigned)lrintf(MAX(0.0f, MIN(1.0f, value)) * 255.0f));
+    };
     pad.leftThumbstick.valueChangedHandler = ^(GCControllerDirectionPad *stick, float x, float y) {
         rsx_metal_touch_axis(0, (unsigned)lrintf(128.0f + MAX(-1.0f, MIN(1.0f, x)) * 127.0f));
         rsx_metal_touch_axis(1, (unsigned)lrintf(128.0f - MAX(-1.0f, MIN(1.0f, y)) * 127.0f));
-        [self setGamepadKey:123 source:[prefix stringByAppendingString:@"stick-left"] pressed:x < -0.35f];
-        [self setGamepadKey:124 source:[prefix stringByAppendingString:@"stick-right"] pressed:x > 0.35f];
-        [self setGamepadKey:110 source:[prefix stringByAppendingString:@"stick-menu-up"] pressed:y > 0.35f];
-        [self setGamepadKey:112 source:[prefix stringByAppendingString:@"stick-menu-down"] pressed:y < -0.35f];
-    };
-    pad.leftTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
-        [self setGamepadKey:125 source:[prefix stringByAppendingString:@"left-trigger"] pressed:value > 0.25f];
-    };
-    pad.rightTrigger.valueChangedHandler = ^(GCControllerButtonInput *trigger, float value, BOOL pressed) {
-        [self setGamepadKey:126 source:[prefix stringByAppendingString:@"right-trigger"] pressed:value > 0.25f];
-    };
-    pad.rightThumbstickButton.valueChangedHandler = ^(GCControllerButtonInput *input, float value, BOOL pressed) {
-        [self setGamepadKey:48 source:[prefix stringByAppendingString:@"r3-click"] pressed:pressed];
-    };
-    pad.leftThumbstickButton.valueChangedHandler = ^(GCControllerButtonInput *input, float value, BOOL pressed) {
-        [self setGamepadKey:31 source:[prefix stringByAppendingString:@"l3-click"] pressed:pressed];
     };
     pad.rightThumbstick.valueChangedHandler = ^(GCControllerDirectionPad *stick, float x, float y) {
         rsx_metal_touch_axis(2, (unsigned)lrintf(128.0f + MAX(-1.0f, MIN(1.0f, x)) * 127.0f));
         rsx_metal_touch_axis(3, (unsigned)lrintf(128.0f - MAX(-1.0f, MIN(1.0f, y)) * 127.0f));
-        [self setGamepadKey:126 source:[prefix stringByAppendingString:@"right-stick-throttle"] pressed:y > 0.35f];
-        [self setGamepadKey:125 source:[prefix stringByAppendingString:@"right-stick-brake"] pressed:y < -0.35f];
     };
 }
 // Semi-transparent progress panel for the game's progress-bar dialogs (the

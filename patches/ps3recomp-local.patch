@@ -957,7 +957,7 @@ index 6d8dd23..e6aaa50 100644
  s32 cellUsbdGetDeviceList(CellUsbdDeviceInfo* list, u32 maxDevices,
                              u32* numDevices);
 diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
-index 85b05f8..088befb 100644
+index 85b05f8..2ffe33b 100644
 --- a/libs/input/cellPad.c
 +++ b/libs/input/cellPad.c
 @@ -12,10 +12,16 @@
@@ -977,7 +977,17 @@ index 85b05f8..088befb 100644
  #include "../../runtime/platform/win32_compat.h"   /* GetTickCount64 on POSIX */
  #include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host */
  
-@@ -484,6 +490,49 @@ static unsigned long long pad_now_ms(void)
+@@ -422,6 +428,9 @@ static void pad_poll_sdl2(void)
+ 
+ static void pad_init_backend(void)
+ {
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    return;   /* GameController.framework is handled by the iOS app shell */
++#endif
+     if (!s_sdl_inited) {
+         if (SDL_WasInit(SDL_INIT_GAMECONTROLLER) == 0) {
+             SDL_InitSubSystem(SDL_INIT_GAMECONTROLLER);
+@@ -484,6 +493,69 @@ static unsigned long long pad_now_ms(void)
  #endif
  }
  
@@ -1021,13 +1031,50 @@ index 85b05f8..088befb 100644
 +#endif
 +    hs->trigger_l2 = (keys.buttons & CELL_PAD_CTRL_L2) ? 255 : 0;
 +    hs->trigger_r2 = (keys.buttons & CELL_PAD_CTRL_R2) ? 255 : 0;
++#if TARGET_OS_IPHONE
++    /* Direct pad lane: host key codes 64..79 carry PS3 button bits 0..15
++     * (SELECT,L3,R3,START,UP,RIGHT,DOWN,LEFT,L2,R2,L1,R1,TRIANGLE,CIRCLE,
++     * CROSS,SQUARE) one-to-one, independent of the keyboard "context" map.
++     * The iOS shell feeds the Xbox controller / touch buttons through here:
++     * titles without a port_keyboard_context (DiRT 3) report UNKNOWN, and
++     * there the keyboard map drops Start, Cross, Circle and menu up/down. */
++    {
++        u16 direct = (u16)(raw[1] & 0xFFFFu);
++        hs->buttons |= direct;
++        unsigned l2 = rsx_metal_touch_axis_value ? rsx_metal_touch_axis_value(4) : 0;
++        unsigned r2 = rsx_metal_touch_axis_value ? rsx_metal_touch_axis_value(5) : 0;
++        if (hs->buttons & CELL_PAD_CTRL_L2) l2 = 255;   /* digital press = full */
++        if (hs->buttons & CELL_PAD_CTRL_R2) r2 = 255;
++        if (l2 > 8) hs->buttons |= CELL_PAD_CTRL_L2;
++        if (r2 > 8) hs->buttons |= CELL_PAD_CTRL_R2;
++        hs->trigger_l2 = (u8)l2;
++        hs->trigger_r2 = (u8)r2;
++    }
++#endif
 +}
 +#endif
 +
  static void pad_poll_backend(void)
  {
      /* Benign race: two threads may poll in the same tick. That costs one extra
-@@ -505,6 +554,9 @@ static void pad_poll_backend(void)
+@@ -497,6 +569,16 @@ static void pad_poll_backend(void)
+      * every port. cellPadGetData hands each one out exactly once. */
+     for (int _i = 0; _i < PAD_MAX_HOST_PORTS; _i++) s_data_fresh[_i] = 1;
+ 
++#if defined(__APPLE__) && TARGET_OS_IPHONE
++    /* iOS: the app shell owns GameController.framework (Xbox/MFi pads and the
++     * touch overlay) and feeds them through rsx_metal_touch_*. SDL polled here,
++     * off the main thread and without an event loop, reported the Xbox pad as
++     * "connected" with no input, which also skipped the touch/controller path
++     * below -- so neither the pad nor the on-screen buttons reached the game. */
++    s_host_state[0].connected = 0;
++    pad_poll_macos_keyboard();
++    return;
++#endif
+ #if PAD_BACKEND_XINPUT
+     pad_poll_xinput();
+ #elif PAD_BACKEND_SDL2
+@@ -505,6 +587,9 @@ static void pad_poll_backend(void)
  #ifdef _WIN32
      if (!s_host_state[0].connected) pad_poll_keyboard();
  #endif
@@ -1037,7 +1084,7 @@ index 85b05f8..088befb 100644
  }
  
  /* ---------------------------------------------------------------------------
-@@ -567,6 +619,10 @@ void cellPad_poll(void)
+@@ -567,6 +652,10 @@ void cellPad_poll(void)
  
  s32 cellPadGetData(u32 port_no, CellPadData* data_guest)
  {
@@ -1048,7 +1095,7 @@ index 85b05f8..088befb 100644
      { static int _once = 0;
        if (!_once++) printf("[cellPad] GetData polling begins (port %u)\n", port_no); }
      if (!s_pad_initialized)
-@@ -683,8 +739,11 @@ skip_inject: ;
+@@ -683,8 +772,11 @@ skip_inject: ;
      { static int s_sc = -1;
        static struct { double t; unsigned mask; } ev[256]; static int n_ev = 0;
        static unsigned long long t0 = 0;   /* not ULONGLONG: this builds on POSIX too */
@@ -1060,7 +1107,7 @@ index 85b05f8..088befb 100644
            const char* e = getenv("PAD_SCRIPT");
            if (e && *e) {
                s_sc = 1; t0 = GetTickCount64();
-@@ -701,6 +760,29 @@ skip_inject: ;
+@@ -701,6 +793,29 @@ skip_inject: ;
            }
        }
        if (s_sc && port_no == 0) {
@@ -1090,7 +1137,7 @@ index 85b05f8..088befb 100644
            double now = pad_clock(t0);
            /* Latch, do not window. A fixed time window is missed whenever the
             * title stops polling the pad for longer than the window (it does
-@@ -720,6 +802,7 @@ skip_inject: ;
+@@ -720,6 +835,7 @@ skip_inject: ;
                        printf("[cellPad] PAD_SCRIPT t=%.1fs press 0x%04X\n", ev[i].t, ev[i].mask); }
                }
            }
@@ -1098,7 +1145,7 @@ index 85b05f8..088befb 100644
        } }
  
      /* PAD_FILE=<path> -- closed-loop input. Each poll, if the file holds a
-@@ -731,33 +814,38 @@ skip_inject: ;
+@@ -731,33 +847,38 @@ skip_inject: ;
       *
       *   echo 0x0008 > pad.txt    # START
       *   echo 0x4000 > pad.txt    # CROSS
@@ -1145,7 +1192,7 @@ index 85b05f8..088befb 100644
        } }
  
      /* Analog sticks */
-@@ -812,6 +900,12 @@ skip_inject: ;
+@@ -812,6 +933,12 @@ skip_inject: ;
      data->button[CELL_PAD_BTN_OFFSET_ANALOG_RIGHT_Y] = hs->analog_ry;
      data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_X]  = hs->analog_lx;
      data->button[CELL_PAD_BTN_OFFSET_ANALOG_LEFT_Y]  = hs->analog_ly;
@@ -1158,7 +1205,7 @@ index 85b05f8..088befb 100644
  
      /* Pressure-sensitive buttons (only meaningful if PRESS_ON) */
      if (setting & CELL_PAD_SETTING_PRESS_ON) {
-@@ -893,6 +987,10 @@ emit:
+@@ -893,6 +1020,10 @@ emit:
              else                        s_data_fresh[port_no] = 0;
          }
      }
@@ -7062,7 +7109,7 @@ index baba40f..1a4f6f6 100644
  void rsx_metal_backend_shutdown(void);
  
 diff --git a/libs/video/rsx_metal_backend.m b/libs/video/rsx_metal_backend.m
-index 32f0b95..2059b32 100644
+index 32f0b95..c8cb188 100644
 --- a/libs/video/rsx_metal_backend.m
 +++ b/libs/video/rsx_metal_backend.m
 @@ -47,15 +47,18 @@
@@ -9022,7 +9069,7 @@ index 32f0b95..2059b32 100644
          /* Only touch the main queue when there is AppKit state to tear down:
           * headless runs never pump it, and a dispatch_sync there would hang. */
          if (fps_session() || s_window || s_window_close_observer) {
-@@ -3971,6 +5094,54 @@ void rsx_metal_backend_shutdown(void)
+@@ -3971,6 +5094,55 @@ void rsx_metal_backend_shutdown(void)
      }
  }
  
@@ -9051,7 +9098,8 @@ index 32f0b95..2059b32 100644
 +}
 +
 +#if TARGET_OS_IPHONE
-+static _Atomic unsigned s_touch_axes[4] = {128, 128, 128, 128};
++/* Axes 0-3: sticks (centre 128). Axes 4-5: analog L2/R2 triggers (rest 0). */
++static _Atomic unsigned s_touch_axes[6] = {128, 128, 128, 128, 0, 0};
 +void rsx_metal_touch_key(unsigned key, int pressed)
 +{
 +    if (key >= 128) return;
@@ -9061,23 +9109,23 @@ index 32f0b95..2059b32 100644
 +}
 +void rsx_metal_touch_axis(unsigned axis, unsigned value)
 +{
-+    if (axis < 4) atomic_store(&s_touch_axes[axis], value > 255 ? 255 : value);
++    if (axis < 6) atomic_store(&s_touch_axes[axis], value > 255 ? 255 : value);
 +}
 +unsigned rsx_metal_touch_axis_value(unsigned axis)
 +{
-+    return axis < 4 ? atomic_load(&s_touch_axes[axis]) : 128;
++    return axis < 6 ? atomic_load(&s_touch_axes[axis]) : (axis < 4 ? 128 : 0);
 +}
 +void rsx_metal_touch_clear(void)
 +{
 +    keyboard_clear();
-+    for (unsigned i = 0; i < 4; ++i) atomic_store(&s_touch_axes[i], 128);
++    for (unsigned i = 0; i < 6; ++i) atomic_store(&s_touch_axes[i], i < 4 ? 128 : 0);
 +}
 +#endif
 +
  static int pump_messages_impl(void)
  {
  #if !TARGET_OS_IPHONE
-@@ -3982,8 +5153,21 @@ static int pump_messages_impl(void)
+@@ -3982,8 +5154,21 @@ static int pump_messages_impl(void)
                                                  inMode:NSDefaultRunLoopMode
                                                 dequeue:YES];
              if (!ev) break;

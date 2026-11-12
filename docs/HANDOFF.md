@@ -142,6 +142,62 @@ Read this first when continuing in a new session.
   driven by PORT_STALL_DUMP_AT="35,60" (port/main.cpp watchdog, set in
   dirt3-runtime-options.json). .gitignore: added /icon/.
 
+- 16:10, 12 Nov, device-run-9 (stall dump): MAIN is in func_0105565C polling
+  `while (cellGcmGetFlipStatus() != DONE) sys_timer_usleep(100)`, so the RSX
+  FIFO drain stopped before reaching the flip (~19 s, right after
+  SetFlipMode(1)). All 38 other PPU threads are blocked normally. MultiStream
+  SPU thread (image 342301998) sits at pc 0x004D4 (constant over 16 samples).
+  The profile has GCM_SEMA_ACQUIRE=1 (blocking acquires) with no bound, so an
+  acquire on a label nobody writes wedges the drain forever. Set
+  GCM_SEMA_ACQUIRE_MS=250: bounded wait that logs "[SEMA] acquire off=..
+  gave up" naming the label/value -- both a workaround and the diagnosis.
+
+- 16:15, 12 Nov, device-run-10: bounded acquires let the drain move; they
+  name the missing fences: labels at inject+0x7D0, 0x810, 0x820, 0x830, 0x840
+  expected == 1, always 0. Screen unchanged (0 fps after ~19 s). MAIN now
+  waits in func_00E7479C: usleep(50) until (target - *[0x015AE400]) < 0x40000
+  (command-ring space; advances only as the RSX consumes). MultiStream SPU
+  still at pc 0x4D4. Next run: PORT_DYN_WATCH=0x3F0007C0,0x100 (watch those
+  labels: PPU stores + SPU DMA PUTs), SPURS_PM_TRACE=1 (policy-module runs),
+  and a "[cellSpurs] workload flag kick" log -- to find who should write the
+  fences (prime suspect: the RSXHelper workload, wid 0).
+
+- 16:45, 12 Nov, device-run-11: label watch shows labels 0x810..0x840 are
+  only ever INITIALISED to 0 (func_00EC8820); nothing writes 1. Label 0x7D0 is
+  set to 1 by the VBLANK handler (opd 0x01469CD8 -> func_0105468C). RSXHelper
+  (wid 0) and wid 1/2 policy modules all run (67/136/137 runs). GCM user
+  commands (0xEB00) arrive; the HLE user handler (opd 0x01463B08 ->
+  func_00E715C8) only calls cellSpursCreateTaskWithAttribute(attr 0x015F3C80)
+  -> SPU task image 309688847 (ELF 0x013BEF80) runs and returns rc=0 each
+  time, no rejected DMAs, but no fence write seen. Next run: SPU_DMA_IMAGE=
+  309688847 (new: every DMA of that image + PUT payload words, spu_dma.h),
+  SPU_DMA_RANGE=3F0007C0-3F0008C0, SPU_ATOMTRACE=200.
+
+- 19:05, 12 Nov, device-run-12: the fence protocol is visible. SPU task image
+  309688847 (spawned by the GCM user handler) is the RING CONSUMER of the
+  control block at 0x015AE400 (the counter MAIN waits on). Per run it GETs
+  label 0x80 (EA 0x3F000800) into LS 0x3FD30, patches fragment programs
+  (GET 0x4Axxxxxx -> PUT RSX local 0xC58Fxxxx), then PUTF (cmd 0x22) the same
+  LS word to labels 0x81..0x84 (0x3F000810..0x840). The RSX acquires 0x81..0x84
+  == 1, so label 0x80 must already be 1 when the task runs; PPU init sets it to
+  0xFFFFFFFF and the fences read 0 at every give-up. Next run logs: every RSX
+  back-end / texture-read label write into 0x7C0..0x8C0 ("[fence]"), the LS
+  word of every SPU DMA into the range ("[dma-range] ... ls-word="), labels
+  0x80..0x84 at each SEMA give-up, and PORT_DYN_WATCH narrowed to 0x800..0x850.
+
+- 19:30, 12 Nov, device-run-14: the RSX fence handshake WORKS: SPU task writes
+  1 to 0x81..0x84 (PUTF), the RSX acquire passes, then texture-read releases
+  set 0x80 = slot index and reset the slot to 0 -- round robin as designed.
+  The game got further and then CRASHED (SIGBUS) in ppu_stwcx32 at guest EA
+  0x68E5E7FF: func_00C78B4C @0x00C791E0 loads a pointer from [0x68E5E7F0] (the
+  ARGUMENT BLOCK of the create/shutdown/join taskset 0x68E5E880) and atomically
+  clears it. cellSpursJoinTaskset returned immediately, so the block was read
+  while that taskset's tasks were still filling it (only visible now that tasks
+  get the real taskset argument). Fix: per-taskset in-flight counter in
+  spu_workload.c (inc at spu_workload_dispatch_async, dec when the job ends)
+  and spu_taskset_join_wait() used by cellSpursJoinTaskset (3 s bound, logs a
+  TIMEOUT with the count).
+
 ## Working preferences (from the user)
 
 - Give long build commands for the user to run in their own terminal; do not
@@ -185,3 +241,13 @@ diagnostic switches are documented in
 - DiRT 3 specifics to watch: `shaders.nfs.sdat` goes through cellFsSdataOpen
   (supported); SPURS job binaries, if any, need lifting like WRC's JOBCRT job.
 - DiRT 3 runs in RPCS3 (macOS and iOS): use it as the reference.
+
+## Run 15 → fix: taskset/task race in CreateTask dispatch
+- Fence ring (labels 0x810..0x840) ran fine for many cycles, then stalled exactly when the loader thread
+  started recycling its own taskset 0x68E5E880 (ShutdownTaskset/CreateTaskset/CreateTask) concurrently.
+- The log showed a fence task (image 309688847) built against taskset **0x68E5E880**, then 0x015F1380
+  task=1, task=2: the dispatcher picked up the taskset/slot from the shared `g_ydkj_real_*` globals, which
+  the other PPU thread had just overwritten. The real slot was never released, so later fence tasks never
+  ran → RSX SEMA give-ups → MAIN stuck in func_00E7479C waiting on ring space.
+- Fix: `spu_workload_set_dispatch_task()` (thread-local hand-off) called by cellSpursCreateTask and
+  spu_taskset_task_exited right before `spu_workload_dispatch_async`; dispatch uses it in preference to the globals.

@@ -514,6 +514,7 @@ static void port_install_crash_handler(void) {}
  * address through cellGcmGetLabelAddress / GetControlRegister / offset tables. */
 extern "C" uint32_t ppu_hle_inject_base;
 extern "C" void ps3_dump_all_threads(const char* label);
+extern "C" void ps3_dyn_watch_arm_c(uint32_t ea, uint32_t len, const char* tag);
 
 /* Stall watchdog (diagnostic): dump every guest/host thread at the times in
  * PORT_STALL_DUMP_AT ("35,60" = 35 s and 60 s after boot). Off when unset. */
@@ -544,6 +545,14 @@ extern "C" int port_game_main(int argc, char** argv)
     ppu_hle_inject_base = 0x3F000000u;
     port_install_crash_handler();
     port_start_stall_watchdog();
+    /* PORT_DYN_WATCH="ea,len": log every PPU store / SPU DMA PUT into the range
+     * from boot (diagnostic; see ps3_dyn_watch_arm in ppu_loader.cpp). */
+    if (const char* w = getenv("PORT_DYN_WATCH")) {
+        unsigned long ea = strtoul(w, nullptr, 0);
+        const char* c = strchr(w, ',');
+        unsigned long len = c ? strtoul(c + 1, nullptr, 0) : 4;
+        if (ea && len) ps3_dyn_watch_arm_c((uint32_t)ea, (uint32_t)len, "PORT_DYN_WATCH");
+    }
 #if TARGET_OS_IPHONE
     ps3_metrics_thread_role(PC_MAIN);
 #endif

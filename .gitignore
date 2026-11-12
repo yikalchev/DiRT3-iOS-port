@@ -1,30 +1,20 @@
 # Local game data, generated game code and third-party checkouts.
 /game/
+/icon/
 /gamedata/
 /build/
 /logs/
 /output/
 /vendor/
-/tools/rpcs3/
-/tools/firmware/
 /port/recompiled/
 /port/spu/
+/research/
 
-# Keep only small authored research inputs and source experiments.
-/research/*
-!/research/*-commit.txt
-!/research/input-manifest.json
-!/research/control-*-plan.json
-!/research/resolution-experiment/
-/research/resolution-experiment/*
-!/research/resolution-experiment/test_metal_resolution.m
-!/research/resolution-experiment/backend.patch
-
-# One complete, current source patch; local historical copies stay local.
+# One complete, current runtime source patch.
 /patches/*
 !/patches/ps3recomp-local.patch
 
-# Game archives, executables, GPU captures and compiled output.
+# Game archives, executables and compiled output.
 *.rar
 *.7z
 *.zip
@@ -41,8 +31,7 @@
 *.a
 *.dylib
 *.metallib
-*.gputrace
-*.trace
+*.ipa
 *.app/
 *.dSYM/
 DerivedData/
